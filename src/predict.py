@@ -17,6 +17,7 @@ from PIL import Image
 
 from .dataset import build_transforms
 from .evaluate import load_checkpoint
+from .paths import project_root
 from .metrics import softmax
 from .prepare_data import IMG_EXT
 
@@ -33,12 +34,18 @@ def collect_images(inputs: list[str]) -> list[Path]:
 
 
 @torch.no_grad()
-def predict_images(checkpoint: str, paths: list[Path], batch_size: int = 32) -> list[dict]:
-    model, meta, device = load_checkpoint(checkpoint)
+def predict_images(checkpoint: str, paths: list[Path], batch_size: int = 32,
+                   threshold: float | None = None, model=None, meta=None, device=None) -> list[dict]:
+    """يصنّف الصور. threshold=None تعني استخدام العتبة المحفوظة داخل نقطة الحفظ.
+
+    يُمكن تمرير model/meta/device مُحمّلة مسبقًا (تفعلها واجهة الويب) لتسريع الطلبات.
+    """
+    if model is None or meta is None or device is None:
+        model, meta, device = load_checkpoint(checkpoint)
     tf = build_transforms(meta["img_size"], train=False)
     classes = meta["classes"]
     temperature = meta.get("temperature", 1.0)
-    threshold = meta.get("threshold", 1.01)
+    threshold = meta.get("threshold", 1.01) if threshold is None else threshold
 
     results: list[dict] = []
     for i in range(0, len(paths), batch_size):
@@ -70,18 +77,30 @@ def predict_images(checkpoint: str, paths: list[Path], batch_size: int = 32) -> 
     return results
 
 
+def detect_model_version(checkpoint: str) -> str:
+    """اسم الإصدار من سجل النماذج إن كان الملف هو نموذج الإنتاج، وإلا اسم مجلده."""
+    from .feedback import load_registry
+    reg = load_registry()
+    prod = reg.get("production")
+    if prod and Path(checkpoint).resolve() == (project_root(Path.cwd()) / "models" / "production" / "model.pt").resolve():
+        return str(prod)
+    return Path(checkpoint).parent.name
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--checkpoint", required=True)
     ap.add_argument("inputs", nargs="+", help="ملفات صور أو مجلدات")
     ap.add_argument("--out", default="predictions.csv")
+    ap.add_argument("--threshold", type=float, default=None,
+                    help="تجاوز عتبة القبول المحفوظة في النموذج (مثل 0.95 لصرامة أعلى)")
     ap.add_argument("--feedback-db", default=None,
                     help="إذا حُدد، تُسجَّل التنبؤات في قاعدة المراجعة لتحسين النموذج لاحقًا")
     ap.add_argument("--model-version", default=None)
     args = ap.parse_args()
 
     paths = collect_images(args.inputs)
-    results = predict_images(args.checkpoint, paths)
+    results = predict_images(args.checkpoint, paths, threshold=args.threshold)
 
     with open(args.out, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=["path", "predicted", "confidence", "decision", "error"])
@@ -95,7 +114,7 @@ def main() -> None:
 
     if args.feedback_db:
         from .feedback import record_predictions
-        version = args.model_version or Path(args.checkpoint).parent.name
+        version = args.model_version or detect_model_version(args.checkpoint)
         n = record_predictions(args.feedback_db, results, version)
         print(f"سُجّل {n} تنبؤ في {args.feedback_db}")
 

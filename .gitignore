@@ -1,0 +1,17 @@
+# بيانات ونماذج ونتائج — لا تُرفع إلى Git (الملفات المتتبَّعة حاليًا تبقى كما هي)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# الصور الخام والأرشيف (data/processed/splits.csv يبقى متتبَّعًا لأنه يحدد التقسيم)
+data/raw/
+*.rar
+*.zip
+
+# نماذج وتدريبات وقاعدة المراجعة
+*.pt
+runs/
+models/
+feedback/
+predictions.csv

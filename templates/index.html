@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+{% block body %}
+
+{% if not state.ready %}
+  <div class="alert">{{ state.error }}</div>
+{% endif %}
+
+<div class="card">
+  <h2>بطاقة النموذج</h2>
+  <div class="kv">
+    <div><span>الإصدار الإنتاجي</span><b>{{ reg.production or "—" }}</b></div>
+    <div><span>المعمارية</span><b>{{ meta.arch or "—" }}</b></div>
+    <div><span>حجم الصورة</span><b>{{ meta.img_size or "—" }}</b></div>
+    <div><span>عتبة القبول</span><b>{{ "%.2f"|format(meta.threshold) if meta.threshold is not none else "—" }}</b></div>
+    <div><span>معايرة الثقة (T)</span><b>{{ "%.3f"|format(meta.temperature) if meta.temperature is not none else "—" }}</b></div>
+    <div><span>دقة الاختبار</span><b>{{ "%.1f%%"|format(reg.info.test.accuracy*100) if reg.info and reg.info.test else "—" }}</b></div>
+    <div><span>macro-F1</span><b>{{ "%.3f"|format(reg.info.test.macro_f1) if reg.info and reg.info.test else "—" }}</b></div>
+    <div><span>خطأ المعايرة ECE</span><b>{{ "%.3f"|format(reg.info.test.ece) if reg.info and reg.info.test else "—" }}</b></div>
+  </div>
+
+  {% if reg.info and reg.info.test and reg.info.test.per_class %}
+  <h3>الأداء لكل فئة على تقسيم الاختبار</h3>
+  <table>
+    <tr><th>الفئة</th><th>الدقة (precision)</th><th>الاسترجاع (recall)</th><th>F1</th><th>عدد الصور</th></tr>
+    {% for cls, m in reg.info.test.per_class.items() %}
+    <tr><td>{{ cls }}</td><td>{{ "%.2f"|format(m.precision) }}</td><td>{{ "%.2f"|format(m.recall) }}</td>
+        <td>{{ "%.2f"|format(m.f1) }}</td><td>{{ m.support }}</td></tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+
+  {% if reg.info and reg.info.test and reg.info.test.decision %}
+  <p class="muted">عند العتبة {{ "%.2f"|format(reg.info.test.decision.threshold) }} يُقبل تلقائيًا
+    {{ "%.0f%%"|format(reg.info.test.decision.auto_accept_rate*100) }} من الصور بدقة
+    {{ "%.1f%%"|format((reg.info.test.decision.accepted_accuracy or 0)*100) }}، ويُحوَّل
+    {{ "%.0f%%"|format(reg.info.test.decision.sent_to_review_rate*100) }} للمراجعة البشرية.</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>رفع صور والتنبؤ بها</h2>
+  {% if error %}<div class="alert">{{ error }}</div>{% endif %}
+  <form method="post" action="{{ url_for('predict') }}" enctype="multipart/form-data">
+    <div class="row">
+      <div>
+        <label for="images">اختر صورة أو أكثر</label>
+        <input id="images" type="file" name="images" multiple accept="image/*" required>
+      </div>
+      <div style="max-width:220px">
+        <label for="threshold">عتبة القبول (اختياري)</label>
+        <input id="threshold" type="number" name="threshold" step="0.01" min="0.5" max="1.0"
+               placeholder="{{ '%.2f'|format(meta.threshold) if meta.threshold is not none else '0.75' }}">
+      </div>
+      <div style="max-width:160px">
+        <button type="submit">🔍 صنّف الصور</button>
+      </div>
+    </div>
+    <p class="muted">كل صورة ثقتها أقل من العتبة تُحوَّل للمراجعة البشرية بدلًا من قبولها بالتخمين،
+      وتُسجَّل تلقائيًا في قاعدة المراجعة لتحسين النموذج لاحقًا.</p>
+  </form>
+
+  {% if results %}
+  <h3>النتائج ({{ results|length }})</h3>
+  <div class="thumbs">
+    {% for r in results %}
+    <div class="thumb">
+      {% if r.id %}<a href="{{ url_for('image', row_id=r.id) }}" target="_blank">
+        <img src="{{ url_for('image', row_id=r.id) }}" alt=""></a>{% endif %}
+      <div class="body">
+        {% if r.decision == 'error' %}
+          <span class="badge error">خطأ</span>
+          <div class="muted">{{ r.error }}</div>
+        {% else %}
+          <div><b>{{ r.predicted }}</b>
+            <span class="badge {{ 'accept' if r.decision == 'accept' else 'review' }}">
+              {{ 'قبول تلقائي' if r.decision == 'accept' else 'مراجعة بشرية' }}</span></div>
+          <div class="muted">الثقة: {{ "%.1f%%"|format(r.confidence*100) }}</div>
+          <div class="bar"><i style="width:{{ (r.confidence*100)|round(1) }}%"></i></div>
+          <div class="probs">
+            {% for c, v in r.probs.items() %}{{ c }}: {{ "%.0f%%"|format(v*100) }}<br>{% endfor %}
+          </div>
+          <div class="actions">
+            <span class="muted">التصحيح:</span>
+            {% for c in meta.classes %}
+            <form method="post" action="{{ url_for('label_row', row_id=r.id) }}" style="display:inline">
+              <input type="hidden" name="label" value="{{ c }}">
+              <input type="hidden" name="reviewer" value="web">
+              <button type="submit" class="ghost">{{ c }}</button>
+            </form>
+            {% endfor %}
+          </div>
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>إحصاءات المراجعة البشرية</h2>
+  {% if stats %}
+  <table>
+    <tr><th>الإصدار</th><th>عدد التنبؤات</th><th>نسبة الإحالة للمراجعة</th><th>رُوجعت</th><th>دقة النموذج على المراجَع</th></tr>
+    {% for s in stats %}
+    <tr>
+      <td>{{ s.version }}</td><td>{{ s.total }}</td><td>{{ "%.0f%%"|format(s.review_rate*100) }}</td>
+      <td>{{ s.reviewed }}</td>
+      <td>{{ "%.1f%%"|format(s.accuracy_on_reviewed*100) if s.accuracy_on_reviewed is not none else "—" }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  <p class="muted">كلما زادت الصور المراجعة بشريًا، أصبح تقييم النموذج على البيانات الحقيقية أدق —
+    وهي أيضًا الوقود لإعادة التدريب: <code>python -m src.feedback retrain --min-new 20</code></p>
+  {% else %}
+  <p class="muted">لا تنبؤات مسجلة بعد. ارفع صورًا من النموذج أعلاه.</p>
+  {% endif %}
+</div>
+
+{% endblock %}

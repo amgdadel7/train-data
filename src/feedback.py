@@ -30,6 +30,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .paths import rel_to_root, resolve_path
 from .prepare_data import sha256_file
 
 DEFAULT_DB = "feedback/feedback.db"
@@ -65,12 +66,13 @@ def connect(db_path: str) -> sqlite3.Connection:
     return conn
 
 
-def record_predictions(db_path: str, results: list[dict], model_version: str,
-                       images_dir: str = DEFAULT_IMAGES) -> int:
+def record_predictions_ids(db_path: str, results: list[dict], model_version: str,
+                           images_dir: str = DEFAULT_IMAGES) -> list[int]:
+    """مثل record_predictions لكنه يُعيد معرّفات الصفوف المُدرجة (مفيد للواجهة)."""
     conn = connect(db_path)
     img_dir = Path(images_dir)
     img_dir.mkdir(parents=True, exist_ok=True)
-    n = 0
+    ids: list[int] = []
     for r in results:
         if r["decision"] == "error":
             continue
@@ -79,15 +81,21 @@ def record_predictions(db_path: str, results: list[dict], model_version: str,
         dst = img_dir / f"{sha}{src.suffix.lower()}"
         if not dst.exists():
             shutil.copy2(src, dst)
-        conn.execute(
+        cur = conn.execute(
             "INSERT INTO predictions (created_at, sha256, image_path, model_version, predicted, "
             "confidence, decision) VALUES (?,?,?,?,?,?,?)",
             (now_iso(), sha, str(dst.resolve()), model_version, r["predicted"], r["confidence"], r["decision"]),
         )
-        n += 1
+        ids.append(int(cur.lastrowid))
     conn.commit()
     conn.close()
-    return n
+    return ids
+
+
+def record_predictions(db_path: str, results: list[dict], model_version: str,
+                       images_dir: str = DEFAULT_IMAGES) -> int:
+    """يسجّل التنبؤات في قاعدة المراجعة ويُعيد عددها."""
+    return len(record_predictions_ids(db_path, results, model_version, images_dir))
 
 
 def pending_reviews(db_path: str, limit: int = 20) -> list[sqlite3.Row]:
@@ -98,6 +106,27 @@ def pending_reviews(db_path: str, limit: int = 20) -> list[sqlite3.Row]:
     ).fetchall()
     conn.close()
     return rows
+
+
+def unreviewed(db_path: str, limit: int = 20, only_review: bool = False) -> list[sqlite3.Row]:
+    """كل الصور التي لم يصنّفها إنسان بعد، الأقل ثقة أولًا.
+
+    only_review=True يقتصر على ما أحاله النموذج للمراجعة فقط.
+    """
+    conn = connect(db_path)
+    sql = "SELECT * FROM predictions WHERE true_label IS NULL"
+    if only_review:
+        sql += " AND decision='review'"
+    rows = conn.execute(sql + " ORDER BY confidence ASC LIMIT ?", (limit,)).fetchall()
+    conn.close()
+    return rows
+
+
+def row_by_id(db_path: str, row_id: int) -> sqlite3.Row | None:
+    conn = connect(db_path)
+    r = conn.execute("SELECT * FROM predictions WHERE id=?", (row_id,)).fetchone()
+    conn.close()
+    return r
 
 
 def submit_label(db_path: str, row_id: int, label: str, classes: list[str], reviewer: str = "") -> None:
@@ -216,6 +245,11 @@ def _install_version(src_ckpt: Path, version: str) -> Path:
     return dest / "model.pt"
 
 
+def registry_splits(version_info: dict) -> Path:
+    """مسار splits.csv المسجل في السجل، محلولًا بالنسبة لجذر المشروع."""
+    return resolve_path(version_info["splits_csv"], Path.cwd())
+
+
 def cmd_register(args) -> None:
     from .evaluate import evaluate_checkpoint
     reg = load_registry()
@@ -224,7 +258,7 @@ def cmd_register(args) -> None:
     m = evaluate_checkpoint(args.checkpoint, args.splits, "test")
     _install_version(Path(args.checkpoint), args.version)
     reg["versions"][args.version] = {
-        "splits_csv": str(Path(args.splits).resolve()), "created": now_iso(),
+        "splits_csv": rel_to_root(Path(args.splits).resolve()), "created": now_iso(),
         "source": args.checkpoint, "test": _summary(m), "promoted": True, "reason": "baseline",
     }
     reg["production"] = args.version
@@ -244,10 +278,11 @@ def cmd_retrain(args) -> None:
     prod = reg["versions"][prod_name]
     prod_ckpt = Path("models") / "production" / "model.pt"
     prod_meta = torch.load(prod_ckpt, map_location="cpu", weights_only=True)["meta"]
+    prod_splits = registry_splits(prod)
 
     run_dir = Path("runs") / f"retrain_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     run_dir.mkdir(parents=True, exist_ok=True)
-    info = build_feedback_splits(args.db, prod["splits_csv"], str(run_dir / "splits.csv"))
+    info = build_feedback_splits(args.db, str(prod_splits), str(run_dir / "splits.csv"))
     print(f"تصنيفات بشرية جديدة للتدريب: {info['new_labeled']} (مستبعد لأنه في val/test: {info['skipped_locked']})")
     if info["new_labeled"] < args.min_new:
         print(f"أقل من الحد الأدنى ({args.min_new}). لا يوجد إعادة تدريب الآن.")
@@ -262,7 +297,7 @@ def cmd_retrain(args) -> None:
     }
     run_training(cfg)
 
-    base_csv = prod["splits_csv"]
+    base_csv = str(prod_splits)
     cand_m = evaluate_checkpoint(str(run_dir / "model.pt"), base_csv, "test")
     prod_m = evaluate_checkpoint(str(prod_ckpt), base_csv, "test")
     ok, reason = decide_promotion(prod_m, cand_m, args.min_gain, args.max_recall_drop)
@@ -272,7 +307,7 @@ def cmd_retrain(args) -> None:
         _install_version(run_dir / "model.pt", version)
         reg["production"] = version
     reg["versions"][version] = {
-        "splits_csv": str(run_dir / "splits.csv"), "created": now_iso(), "source": str(run_dir),
+        "splits_csv": rel_to_root(run_dir / "splits.csv"), "created": now_iso(), "source": str(run_dir),
         "test": _summary(cand_m), "production_before": _summary(prod_m),
         "promoted": ok, "reason": reason, "new_labeled": info["new_labeled"],
     }
@@ -323,7 +358,8 @@ def main() -> None:
     elif args.cmd == "label":
         reg = load_registry()
         prod = reg["versions"].get(reg["production"] or "", {})
-        classes = json.loads((Path(prod["splits_csv"]).parent / "classes.json").read_text(encoding="utf-8")) if prod else []
+        classes = (json.loads((registry_splits(prod).parent / "classes.json").read_text(encoding="utf-8"))
+                   if prod else [])
         submit_label(args.db, args.id, args.label, classes, args.reviewer)
         print(f"تم تسجيل التصنيف للمعرف {args.id}")
     elif args.cmd == "status":

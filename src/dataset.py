@@ -7,6 +7,8 @@ from pathlib import Path
 
 import torch
 from PIL import Image
+
+from .paths import resolve_path
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms as T
 
@@ -36,10 +38,8 @@ def load_rows(splits_csv: str | Path, split: str | None = None) -> list[dict]:
         for r in csv.DictReader(f):
             if split is not None and r["split"] != split:
                 continue
-            p = Path(r["path"])
-            if not p.is_absolute():
-                p = (splits_csv.parent / p).resolve()
-            rows.append({"path": p, "label": r["label"], "sha256": r.get("sha256", "")})
+            rows.append({"path": resolve_path(r["path"], splits_csv.parent),
+                         "label": r["label"], "sha256": r.get("sha256", "")})
     return rows
 
 

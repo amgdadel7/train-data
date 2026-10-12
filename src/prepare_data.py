@@ -22,6 +22,8 @@ from pathlib import Path
 
 from PIL import Image
 
+from .paths import project_root, rel_to_root
+
 IMG_EXT = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 
 
@@ -106,9 +108,63 @@ def stratified_split(rows: list[dict], val_frac: float, test_frac: float, seed: 
     return out
 
 
+def index_by_hash(raw_dir: Path) -> dict[str, Path]:
+    """فهرس الصور الموجودة فعليًا حسب بصمتها sha256."""
+    index: dict[str, Path] = {}
+    for p in sorted(raw_dir.rglob("*")):
+        if p.is_file() and p.suffix.lower() in IMG_EXT:
+            index.setdefault(sha256_file(p), p)
+    return index
+
+
+def rebase_splits(splits_csv: Path, raw_dir: Path, report_csv: Path | None = None) -> dict:
+    """يعيد كتابة مسارات splits.csv لتصبح نسبية عن جذر المشروع.
+
+    المطابقة تتم بالبصمة sha256 (أو باسم الملف للصور غير الصالحة)، لذلك:
+      * لا يتغيّر التقسيم (train/val/test) ولا التسميات إطلاقًا،
+      * تعمل نفس الملفات بعد نقل المشروع إلى جهاز أو نظام آخر.
+    """
+    with open(splits_csv, newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    index = index_by_hash(raw_dir)
+    by_name = {p.name: p for p in index.values()}
+
+    def rebase(r: dict) -> bool:
+        hit = index.get(r.get("sha256", "")) or (by_name.get(Path(r["path"]).name) if r.get("path") else None)
+        if hit is None:
+            return False
+        r["path"] = rel_to_root(hit)
+        return True
+
+    updated = sum(rebase(r) for r in rows)
+    with open(splits_csv, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=["path", "label", "sha256", "split"])
+        w.writeheader()
+        w.writerows(rows)
+
+    report_updated = 0
+    if report_csv is None:
+        report_csv = splits_csv.parent / "duplicates_report.csv"
+    if report_csv.exists():
+        with open(report_csv, newline="", encoding="utf-8") as f:
+            rep = list(csv.DictReader(f))
+        for r in rep:
+            if rebase(r):
+                report_updated += 1
+        with open(report_csv, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=["sha256", "action", "path"])
+            w.writeheader()
+            w.writerows(rep)
+
+    return {"rows": len(rows), "rebased": updated, "missing": len(rows) - updated,
+            "report_rebased": report_updated, "root": str(project_root(Path.cwd()))}
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--raw-dir", default="data/raw")
+    ap.add_argument("--rebase", action="store_true",
+                    help="أعد كتابة مسارات splits.csv الحالية لتصبح نسبية (بدون إعادة تقسيم)")
     ap.add_argument("--archive", default=None, help="ملف RAR/ZIP يُستخرج داخل raw-dir أولاً")
     ap.add_argument("--out-dir", default="data/processed")
     ap.add_argument("--val-frac", type=float, default=0.15)
@@ -117,6 +173,17 @@ def main() -> None:
     args = ap.parse_args()
 
     raw = Path(args.raw_dir)
+    out = Path(args.out_dir)
+    if args.rebase:
+        splits_csv = out / "splits.csv"
+        if not splits_csv.exists():
+            sys.exit(f"لا يوجد ملف {splits_csv} لإعادة ضبط مساراته")
+        info = rebase_splits(splits_csv, raw)
+        print(f"أُعيد ضبط {info['rebased']}/{info['rows']} مسارًا بالنسبة لجذر المشروع: {info['root']}")
+        if info["missing"]:
+            print(f"تحذير: {info['missing']} صف لم تُعثر على صورته داخل {raw}")
+        return
+
     if args.archive:
         extract_archive(Path(args.archive), raw)
 
@@ -127,9 +194,9 @@ def main() -> None:
     rows, invalid = [], []
     for p, label in items:
         if not is_valid_image(p):
-            invalid.append(str(p))
+            invalid.append(rel_to_root(p))
             continue
-        rows.append({"path": str(p.resolve()), "label": label, "sha256": sha256_file(p)})
+        rows.append({"path": rel_to_root(p), "label": label, "sha256": sha256_file(p)})
 
     rows, report = dedupe_rows(rows)
     for p in invalid:
@@ -138,7 +205,6 @@ def main() -> None:
     classes = sorted({r["label"] for r in rows})
     splits = stratified_split(rows, args.val_frac, args.test_frac, args.seed)
 
-    out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     with open(out / "splits.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=["path", "label", "sha256", "split"])
