@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}المراجعة البشرية{% endblock %}
+{% block body %}
+
+<div class="card">
+  <h2>طابور المراجعة</h2>
+  <p class="muted">الصور غير المصنّفة بشريًا، الأقل ثقة أولًا:
+    <b>{{ remaining }}</b> صورة (منها {{ total_pending }} أحالها النموذج للمراجعة).
+    تصحيحك هنا يذهب مباشرة إلى قاعدة المراجعة ويُستخدم في إعادة التدريب.</p>
+
+  <form method="get" action="{{ url_for('review') }}" class="row">
+    <div style="max-width:200px">
+      <label for="limit">عدد الصور في الصفحة</label>
+      <input id="limit" type="number" name="limit" value="{{ limit }}" min="1" max="60">
+    </div>
+    <div style="max-width:260px">
+      <label for="only_review">النطاق</label>
+      <select id="only_review" name="only_review" style="background:#1e222b;border:1px solid #2a2f3a;color:#e8eaf0;border-radius:10px;padding:9px;width:100%">
+        <option value="1" {% if only_review %}selected{% endif %}>ما أحاله النموذج للمراجعة فقط</option>
+        <option value="0" {% if not only_review %}selected{% endif %}>كل الصور غير المصنّفة</option>
+      </select>
+    </div>
+    <div style="max-width:160px"><button type="submit" class="ghost">تحديث</button></div>
+  </form>
+</div>
+
+{% if not rows %}
+<div class="card"><p class="muted">لا شيء بانتظار المراجعة. 🎉</p></div>
+{% endif %}
+
+<div class="thumbs">
+{% for r in rows %}
+  <div class="thumb">
+    <a href="{{ url_for('image', row_id=r['id']) }}" target="_blank">
+      <img src="{{ url_for('image', row_id=r['id']) }}" alt=""></a>
+    <div class="body">
+      <div><b>توقع النموذج:</b> {{ r['predicted'] }}
+        <span class="badge {{ 'accept' if r['decision'] == 'accept' else 'review' }}">
+          {{ 'قُبل' if r['decision'] == 'accept' else 'مراجعة' }}</span></div>
+      <div class="muted">الثقة: {{ "%.1f%%"|format(r['confidence']*100) }} · الإصدار {{ r['model_version'] }} · #{{ r['id'] }}</div>
+      <div class="actions">
+        {% for c in classes %}
+        <form method="post" action="{{ url_for('label_row', row_id=r['id']) }}" style="display:inline">
+          <input type="hidden" name="label" value="{{ c }}">
+          <input type="hidden" name="reviewer" value="web">
+          <input type="hidden" name="limit" value="{{ limit }}">
+          <input type="hidden" name="only_review" value="{{ 1 if only_review else 0 }}">
+          <button type="submit">{{ c }}</button>
+        </form>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+{% endfor %}
+</div>
+
+{% endblock %}
